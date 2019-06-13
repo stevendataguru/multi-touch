@@ -1,0 +1,243 @@
+import numpy as np
+import pandas as pd
+
+# Load the journey dataset and insert a "Start" column at the beginning, to explicitly mark the initial state.
+df = pd.read_csv('simple_conversion_data.csv', header=None)
+df.insert(0, 'Start', 'Start')
+
+In [77]:
+df
+Out[77]:(!!!this is the table)
+Start	0	1	2	3
+0	Start	C1	C2	C3	Conversion
+1	Start	C1	NaN	NaN	NaN
+2	Start	C2	C3	NaN	NaN
+
+
+2. Transform the Data
+
+
+
+# Reshape the journey dataset to get a new, two-column dataset that contains each 
+# transition. That is, each row in the new dataset will contain: (T, T+1) 
+transitions = list()
+for n in range(0, len(df.columns)-1):
+    df_transition = pd.DataFrame({
+        't': df.iloc[:,n], 
+        't_plus_1': df.iloc[:,n+1]
+    })
+    transitions.append(df_transition)
+df_transitions = pd.concat(transitions)
+
+# We can drop all rows with NaN values in state T (the starting state).
+# These represent journey's that have already been completed.
+df_transitions.dropna(subset=['t'], inplace=True)
+
+# Let's replace the NaN's in the T+1 columns with a value indicating that the user bailed.
+# This will avoid problems later when we do groupby functions on the dataframe.
+df_transitions.fillna('Exit', inplace=True)
+
+
+df_transitions
+
+
+# Create a separate lookup table with row counts for each starting state, t, in the 
+# transitions table. We'll use this to calculate probabilities later, and it will  
+# help us avoid the slow performing df.apply() method.
+df_initial_state_counts = df_transitions.groupby(by=['t'], as_index=False).count()
+df_initial_state_counts.rename(columns={'t_plus_1':'count_of_t'}, inplace=True)
+
+
+
+df_initial_state_counts
+
+
+3. Calculate Transition Probabilities
+
+# Join the lookup table to the transitions table, to pull in the counts for each starting state, t.
+df_transitions = pd.merge(df_transitions, df_initial_state_counts, on='t', how='inner')
+
+
+df_transitions
+
+
+# Calculate the individual probability for each transition instance
+df_transitions['probability'] = 1/df_transitions['count_of_t']
+
+
+
+df_transitions
+
+
+# Calculate the total probability of transitioning from one state to another
+df_transition_prob = df_transitions.groupby(by=['t', 't_plus_1'], as_index=False).sum()
+df_transition_prob.drop(['count_of_t'], axis=1, inplace=True)  # We don't need this column anymore
+
+
+df_transition_prob
+
+
+# Double-check to make sure the total probability for each starting state, t, equals 1.0 (i.e. 100%)
+df_test = df_transition_prob.groupby(by='t', as_index=False).sum()
+df_test
+
+
+
+print(' ')
+if df_test['probability'].sum() != len(df_test):
+    print('[ERROR]: The probability calculation test failed. :(')
+else:
+    print('The probability calculation test passed!!! :)')
+print(' ')
+
+
+4. Calculate Total Conversion Probability
+
+
+def print_node(node, debug=False):
+    # Print each node as it's processed. For debugging purposes.
+    
+    if not debug:
+        return
+    
+    if node['t_plus_1'] in ['Exit', 'Conversion']:
+        node_type = 'Leaf'
+    else:
+        node_type = 'Parent'
+    
+    print('%s > %s' % (node['t'], node['t_plus_1']))
+    print('Type: %s' % node_type)
+    print('Prob: %0.2f' % node['probability'])
+    print('----------------------------')
+    
+    
+    
+calculated_node_probabilities = dict()
+
+def calc_conversion_probability(starting_state, df_transitions, cum_probability, calculated_nodes, debug=True):
+    # Calculates the cumulative probability of reaching a conversion, given a starting state.
+    # Assumes the transition dataframe represents a Directed Acyclic Graph (DAG)
+        
+    # Get the transition probabilities for the starting state we're evaluating
+    df_nodes = df_transitions[df_transitions['t'] == starting_state]
+
+    
+    # Loop through the starting states and either return the probability for 
+    # a leaf node, or recurse to keep following the tree.
+    
+    node_conversion_probability = 0
+    
+    child_node_proabilities = []
+    
+    for index, row in df_nodes.iterrows():
+        
+        # These are leaf nodes: either an exit or conversion
+        if row['t_plus_1'] == 'Exit':
+            print_node(row, debug)
+            child_node_proabilities.append(0)
+        
+        elif row['t_plus_1'] == 'Conversion':
+            print_node(row, debug)
+            child_node_proabilities.append(row['probability'])
+        
+        # This is a parent node: Keep following the rabbit hole
+        else:
+            
+            # Have we cached the total probability for this node???
+            if row['t_plus_1'] in calculated_nodes:
+                if debug:
+                    print('Cache Hit for %s! Cum probability from child: %0.2f' % (row['t_plus_1'], calculated_nodes[row['t_plus_1']]))
+                child_probability = calculated_nodes[row['t_plus_1']]
+            
+            # No cached value found. We'll walk through the tree to calculated the value.
+            else:
+                # Recursive call
+                child_probability = calc_conversion_probability(row['t_plus_1'], 
+                                                                df_transitions, 
+                                                                cum_probability + row['probability'],
+                                                                calculated_nodes, 
+                                                                debug)
+                node_conversion_prob = child_probability * row['probability']
+                
+            print_node(row, debug)
+            child_node_proabilities.append(node_conversion_prob)
+                    
+            if debug:
+                print('%s > %s' % (row['t'], row['t_plus_1']))
+                print('Cum Prob from Child : %0.2f' % child_probability)
+                print('Prob to Child Node  : %0.2f' % row['probability'])
+                print('Node Conv Proability: %0.2f' % node_conversion_prob)
+                print('----------------------------')
+    
+    total_node_probability = sum(child_node_proabilities)
+    if debug:
+        print('Node Conversion Probability for %s: %0.2f' % (starting_state, total_node_probability))
+        print('----------------------------')
+    
+    # We'll cache the calculated total probability for the node, so we don't have to calculate it again.
+    calculated_node_probabilities[starting_state] = total_node_probability
+        
+    return total_node_probability
+    
+    
+    
+starting_node = 'Start'
+print('====== START DEBUG PRINT ======')
+total_probability = calc_conversion_probability(starting_node, df_transition_prob, 0, calculated_node_probabilities)
+print('====== END DEBUG PRINT ======')
+print(' ')
+print('Total Conversion Probability from %s: %0.2f' % (starting_node, total_probability))
+
+
+
+5. Calculate Removal Effect
+
+# Let's look at our transition probability table again. We'll tweak this to calculate the 
+# removal effect.
+df_transition_prob
+
+
+
+# Let's look at our transition probability table again. We'll tweak this to calculate the 
+# removal effect.
+df_transition_prob
+
+
+unique_channels = df_transition_prob[df_transition_prob['t'] != 'Start']['t'].unique()
+
+
+
+pd.options.mode.chained_assignment = None  # I know, this makes me a very bad person.
+removal_effects = dict()
+
+# Remove each channel and calculate the impact
+for channel in unique_channels:
+    
+    # Remove the channel from the transition probability matrix
+    df_reduced_graph = df_transition_prob[df_transition_prob['t'] != channel]
+    df_reduced_graph.loc[df_reduced_graph['t_plus_1']==channel, 't_plus_1'] = 'Exit'
+    
+    # Recalculate the total conversion probability
+    calculated_node_probabilities = dict()
+    new_total_probability = calc_conversion_probability('Start', 
+                                                        df_reduced_graph, 
+                                                        0, 
+                                                        calculated_node_probabilities, 
+                                                        debug=False)
+    
+    # Calculate the difference in conversion probability
+    removal_effect = (total_probability - new_total_probability)/total_probability
+    removal_effects[channel] = removal_effect
+    
+    
+    
+ 6. Results: Which channels have the greatest impact?
+ 
+ 
+ print('Removal effect by channel:')
+for key, value in removal_effects.items(): 
+    print('%s: %0.2f' % (key, value))
+    
+    
+    
+''''''https://github.com/jakebenn/multi-touch-attribution-markov-chains/blob/master/multi-touch-attribution.ipynb''''
